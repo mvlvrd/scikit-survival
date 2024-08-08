@@ -5807,8 +5807,8 @@ class TestKaplanMeier:
     @staticmethod
     def test_truncated_reverse_error(truncated_failure_data):
         with pytest.raises(
-            ValueError,
-            match="The censoring distribution cannot be estimated from left truncated data",
+                ValueError,
+                match="The censoring distribution cannot be estimated from left truncated data",
         ):
             kaplan_meier_estimator(*truncated_failure_data, reverse=True)
 
