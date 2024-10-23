@@ -259,7 +259,7 @@ def safe_concat(objs, *args, **kwargs):
         If True, do not use the index values along the concatenation axis. The
         resulting axis will be labeled 0, ..., n - 1. This is useful if you are
         concatenating objects where the concatenation axis does not have
-        meaningful indexing information. Note the the index values on the other
+        meaningful indexing information. Note the index values on the other
         axes are still respected in the join.
     copy : boolean, default True
         If False, do not copy data unnecessarily
@@ -302,7 +302,7 @@ class _PropertyAvailableIfDescriptor:
     """Implements a conditional property using the descriptor protocol based on the property decorator.
 
     The corresponding class in scikit-learn (`_AvailableIfDescriptor`) only supports callables.
-    This class adopts the property decorator as described in the descriptor guide in the offical Python documentation.
+    This class adopts the property decorator as described in the descriptor guide in the official Python documentation.
 
     See also
     --------
