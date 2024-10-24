@@ -26,6 +26,7 @@ __all__ = [
     "nelson_aalen_estimator",
     "ipc_weights",
     "SurvivalFunctionEstimator",
+    "km_cumulative_incidence_competing_risks",
 ]
 
 
