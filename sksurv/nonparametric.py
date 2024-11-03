@@ -602,12 +602,42 @@ class CensoringDistributionEstimator(SurvivalFunctionEstimator):
         return weights
 
 
+def _cr_ci_logmlog(cum_inc, sigma_t, z):
+    """Compute the pointwise log-minus-log transformed confidence intervals"""
+    """TODO: Check eps operations are done properly."""
+    eps = np.finfo(cum_inc.dtype).eps
+    log_cum_i = np.zeros_like(cum_inc)
+    np.log(cum_inc, where=cum_inc > eps, out=log_cum_i)
+    theta = np.zeros_like(cum_inc)
+    den = cum_inc * log_cum_i
+    np.true_divide(sigma_t, den, where=den < -eps, out=theta)
+    theta = z * np.multiply.outer(np.array([-1, 1]), theta)
+    ci = np.exp(log_cum_i * np.exp(theta))
+    ci[:, cum_inc <= eps] = 0.0
+    ci[:, 1.0 - cum_inc <= eps] = 1.0
+    return ci
+
+
+def _km_cum_inc_cr_ci_estimator(cum_inc, var, conf_level, conf_type):
+    if conf_type not in {"log-log"}:
+        raise ValueError(f"conf_type must be None or a str among {{'log-log'}}, but was {conf_type!r}")
+
+    if not isinstance(conf_level, numbers.Real) or not np.isfinite(conf_level) or conf_level <= 0 or conf_level >= 1.0:
+        raise ValueError(f"conf_level must be a float in the range (0.0, 1.0), but was {conf_level!r}")
+
+    z = stats.norm.isf((1.0 - conf_level) / 2.0)
+    sigma = np.sqrt(var)
+    ci = _cr_ci_logmlog(cum_inc[1:], sigma, z)
+    return ci
+
+
 def km_cumulative_incidence_competing_risks(
         event,
         time_exit,
         time_enter=None,
         time_min=None,
         reverse=None,
+        var_type="Scrucca",
         conf_level=None,
         conf_type=None
 ):
@@ -656,6 +686,13 @@ def km_cumulative_incidence_competing_risks(
         The first dimension indicates total risk (i=0)
         or the incidence for each competing risk (i=1,n_risks)
 
+    conf_int : array, shape = (2, n_risks + 1, n_times)
+        Pointwise confidence interval of the Kaplan-Meier estimator
+        at each unique time point.
+        The first dimension indicates total risk (i=0)
+        or the incidence for each competing risk (i=1,n_risks)
+        Only provided if `conf_type` is not None.
+
     Examples
     --------
     Creating a Kaplan-Meier curve:
@@ -681,10 +718,7 @@ def km_cumulative_incidence_competing_risks(
     check_consistent_length(event, time_exit)
 
     if time_enter is not None:
-        raise NotImplementedError("Left censored data is not implememted.")
-
-    if conf_level is not None or conf_type is not None:
-        raise NotImplementedError("Confidence error estimation is not implemented")
+        raise NotImplementedError("Left censored data is not implemented.")
 
     if reverse is not None:
         raise NotImplementedError("Not implemented for competing risks. Use kaplan_meier_estimator instead.")
@@ -697,8 +731,8 @@ def km_cumulative_incidence_competing_risks(
     ratio = np.divide(
         n_events_cr,
         n_at_risk[..., np.newaxis],
-        out = np.zeros((n_t, n_risks+1), dtype=float),
-        where = n_events_cr != 0
+        out=np.zeros((n_t, n_risks+1), dtype=float),
+        where=n_events_cr != 0
     )
 
     if time_min is not None:
@@ -706,12 +740,62 @@ def km_cumulative_incidence_competing_risks(
         uniq_times = np.compress(mask, uniq_times)
         ratio = np.compress(mask, ratio)
 
-    kpe_cum_inc = np.empty((n_risks+1, n_t), dtype=float)
-    kpe = np.cumprod(1.0 - ratio[:,0])
-    kpe_prime = np.ones(shape=kpe.shape, dtype=kpe.dtype)
+    cum_inc = np.empty((n_risks+1, n_t), dtype=float)
+    kpe = np.cumprod(1.0 - ratio[:, 0])
+    kpe_prime = np.ones_like(kpe)
     kpe_prime[1:] = kpe[:-1]
-    for i in range(1,n_risks+1):
-        kpe_cum_inc[i] = np.cumsum(ratio[:,i]*kpe_prime)
-    kpe_cum_inc[0] = 1.0 - kpe
+    for i in range(1, n_risks+1):
+        cum_inc[i] = np.cumsum(ratio[:, i]*kpe_prime)
+    cum_inc[0] = 1.0 - kpe
 
-    return uniq_times, kpe_cum_inc
+    if conf_type is None:
+        return uniq_times, cum_inc
+
+    if var_type == "Scrucca":
+        varx, var = var_scrucca(n_events_cr, kpe_prime, n_at_risk, cum_inc, ratio)
+    elif var_type == "Choudhury":
+        varx, var = var_choudhury(n_events_cr, kpe_prime, n_at_risk)
+    else:
+        raise ValueError(f"{var_type=} not implemented.")
+    #TODO: Add ci for the non competing risks case
+    ci = _km_cum_inc_cr_ci_estimator(cum_inc, var, conf_level, conf_type)
+
+    return uniq_times, cum_inc, ci, varx, np.sqrt(var)
+
+
+def var_scrucca(n_events_cr, kpe_prime, n_at_risk, cum_inc, ratio):
+    dr = n_events_cr[:, 0]
+    dr_cr = n_events_cr[:, 1:].T
+    irt = cum_inc[1:, :, np.newaxis] - cum_inc[1:, np.newaxis, :]
+    mask = np.tril(np.ones_like(irt[0]))
+
+    var_a = np.einsum('ijk,jk,k->ij', irt**2, mask, ratio[:, 0]/(n_at_risk - dr))
+    var_b = np.cumsum(((n_at_risk - dr_cr)/n_at_risk)*(dr_cr/n_at_risk**2)*kpe_prime**2, axis=1)
+    var_c = -2*np.einsum('ijk,jk,ik,k->ij', irt, mask, dr_cr, kpe_prime/n_at_risk**2)
+
+    var = var_a + var_b + var_c
+    return (var_a, var_b, var_c), var
+
+
+def var_choudhury(n_events_cr, kpe_prime, n_at_risk):
+    dr = n_events_cr[:, 0]
+    dr_cr = n_events_cr[:, 1:].T
+    theta = dr_cr*kpe_prime/n_at_risk
+    x = dr/(n_at_risk*(n_at_risk - dr))
+    cs = np.cumsum(x) - x
+
+    n_t = dr.size
+    i_idx = np.arange(n_t)[:, None, None]
+    j_idx = np.arange(n_t)[None, :, None]
+    k_idx = np.arange(n_t)[None, None, :]
+    mask = ((j_idx < i_idx) & (k_idx > j_idx) & (k_idx <= i_idx)).astype(int)
+
+    _v1 = np.zeros_like(theta)
+    np.divide(theta ** 2 * (n_at_risk - dr_cr), n_at_risk * dr_cr, out=_v1, where=dr_cr > 0)
+    v1 = np.cumsum(_v1, axis=1)
+    v2 = np.cumsum(theta**2*cs, axis=1)
+    v3 = 2*np.einsum('rj,rk,ijk->ri', -theta/n_at_risk, theta, mask)
+    v4 = 2*np.einsum('rj,rk,ijk->ri', theta*cs, theta, mask)
+
+    var = v1 + v2 + v3 + v4
+    return (v1, v2, v3, v4), var
